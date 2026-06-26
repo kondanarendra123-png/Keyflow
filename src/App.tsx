@@ -113,11 +113,36 @@ export default function App() {
       try {
         const device = await nav.bluetooth.requestDevice({
           acceptAllDevices: true,
-          optionalServices: ['generic_access']
+          optionalServices: [
+            'generic_access',
+            'generic_attribute',
+            'device_information',
+            'human_interface_device'
+          ]
         });
         setIsScanningBluetooth(false);
-        const server = await device.gatt?.connect();
-        setBluetoothDevice(device);
+        
+        // Handle name resolution gracefully: if name is null, empty, or "Unknown", resolve to a friendly name
+        const resolvedName = (device.name && device.name.toLowerCase() !== "unknown" && device.name.trim() !== "")
+          ? device.name
+          : ("Bluetooth Host (" + (device.id ? device.id.slice(0, 5).toUpperCase() : "PC") + ")");
+
+        // Wrap the native device in a Proxy to override the read-only 'name' property
+        const deviceProxy = new Proxy(device, {
+          get(target, prop) {
+            if (prop === 'name') {
+              return resolvedName;
+            }
+            const val = target[prop];
+            if (typeof val === 'function') {
+              return val.bind(target);
+            }
+            return val;
+          }
+        });
+
+        const server = await deviceProxy.gatt?.connect();
+        setBluetoothDevice(deviceProxy);
         setBluetoothConnected(true);
         setUsbConnected(false);
         setUsbDevice(null);
@@ -254,7 +279,26 @@ export default function App() {
             if (devices && devices.length > 0) {
               const dev = devices[0];
               await dev.gatt?.connect();
-              setBluetoothDevice(dev);
+
+              // Resolve friendly name gracefully
+              const resolvedName = (dev.name && dev.name.toLowerCase() !== "unknown" && dev.name.trim() !== "")
+                ? dev.name
+                : ("Bluetooth Host (" + (dev.id ? dev.id.slice(0, 5).toUpperCase() : "PC") + ")");
+
+              const deviceProxy = new Proxy(dev, {
+                get(target, prop) {
+                  if (prop === 'name') {
+                    return resolvedName;
+                  }
+                  const val = target[prop];
+                  if (typeof val === 'function') {
+                    return val.bind(target);
+                  }
+                  return val;
+                }
+              });
+
+              setBluetoothDevice(deviceProxy);
               setBluetoothConnected(true);
               setUsbConnected(false);
               setActiveMedium("Bluetooth");
