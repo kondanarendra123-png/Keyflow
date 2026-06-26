@@ -1,0 +1,6 @@
+{
+  "name": "Keyflow",
+  "description": "Premium virtual keyboard and secure credentials injection over USB OTG and Bluetooth HID.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
