@@ -24,28 +24,35 @@ import {
   Settings
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import jsQR from "jsqr";
 import { androidCodeFiles } from "./data/androidCode";
+import jsQR from "jsqr";
 
 export default function App() {
-  // Simulator/Real connection states
+  // Simulator connection states
   const [usbConnected, setUsbConnected] = useState(false);
   const [bluetoothConnected, setBluetoothConnected] = useState(false);
   const [activeMedium, setActiveMedium] = useState<"USB" | "Bluetooth" | "">("");
   const [connectionFailure, setConnectionFailure] = useState(false);
+
+  // Real USB and Bluetooth device references
+  const [usbDevice, setUsbDevice] = useState<any>(null);
+  const [bluetoothDevice, setBluetoothDevice] = useState<any>(null);
   
-  const [realUsbDeviceName, setRealUsbDeviceName] = useState<string | null>(null);
-  const [realBluetoothDeviceName, setRealBluetoothDeviceName] = useState<string | null>(null);
-
-  // File Upload states
-  const [isDragging, setIsDragging] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-
   // Custom states for long-press discovery & pairing window
   const [isSearchingModalOpen, setIsSearchingModalOpen] = useState(false);
   const [searchType, setSearchType] = useState<"USB" | "Bluetooth" | null>(null);
   const [isScanningDevices, setIsScanningDevices] = useState(false);
+
+  // Bluetooth specific scanning states
+  const [isScanningBluetooth, setIsScanningBluetooth] = useState(false);
+  const [scannedDevices, setScannedDevices] = useState<any[]>([]);
+
+  const closeSearchingModal = () => {
+    setIsSearchingModalOpen(false);
+    setSearchType(null);
+    setIsScanningBluetooth(false);
+    setScannedDevices([]);
+  };
 
   const longPressTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -57,10 +64,10 @@ export default function App() {
       setSearchType(type);
       setIsSearchingModalOpen(true);
       setIsScanningDevices(true);
-      // Let it spin for 800ms
+      // Scan for 1 second before showing pairing status
       setTimeout(() => {
         setIsScanningDevices(false);
-      }, 800);
+      }, 1000);
     }, 600); // 600ms hold time
   };
 
@@ -68,6 +75,125 @@ export default function App() {
     if (longPressTimeoutRef.current) {
       clearTimeout(longPressTimeoutRef.current);
       longPressTimeoutRef.current = null;
+    }
+  };
+
+  // Real WebUSB device pairing/connection
+  const connectRealUSB = async () => {
+    const nav = navigator as any;
+    if (!nav.usb) {
+      alert("WebUSB is not supported in this browser context (e.g. iframes). Please try opening the app in a new tab.");
+      return;
+    }
+    try {
+      const device = await nav.usb.requestDevice({ filters: [] });
+      await device.open();
+      if (device.configuration === null) {
+        await device.selectConfiguration(1);
+      }
+      await device.claimInterface(0);
+      setUsbDevice(device);
+      setUsbConnected(true);
+      setBluetoothConnected(false);
+      setBluetoothDevice(null);
+      setActiveMedium("USB");
+      setIsSearchingModalOpen(false);
+    } catch (err) {
+      console.error("WebUSB pairing failed:", err);
+    }
+  };
+
+  // Real Web Bluetooth device pairing/connection
+  const connectRealBluetooth = async () => {
+    const nav = navigator as any;
+    setIsScanningBluetooth(true);
+    setScannedDevices([]);
+
+    if (nav.bluetooth) {
+      try {
+        const device = await nav.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: ['generic_access']
+        });
+        setIsScanningBluetooth(false);
+        const server = await device.gatt?.connect();
+        setBluetoothDevice(device);
+        setBluetoothConnected(true);
+        setUsbConnected(false);
+        setUsbDevice(null);
+        setActiveMedium("Bluetooth");
+        setIsSearchingModalOpen(false);
+      } catch (err) {
+        setIsScanningBluetooth(false);
+        console.warn("Web Bluetooth native requestDevice failed or was cancelled:", err);
+      }
+    } else {
+      setIsScanningBluetooth(false);
+      alert("Web Bluetooth is not supported or is blocked in this browser context (e.g. iframes). Please try opening the app in a new tab.");
+    }
+  };
+
+  const disconnectUSB = async () => {
+    if (usbDevice) {
+      try {
+        await usbDevice.close();
+      } catch (e) {}
+    }
+    setUsbDevice(null);
+    setUsbConnected(false);
+    setActiveMedium("");
+  };
+
+  const disconnectBluetooth = async () => {
+    if (bluetoothDevice) {
+      try {
+        await bluetoothDevice.gatt?.disconnect();
+      } catch (e) {}
+    }
+    setBluetoothDevice(null);
+    setBluetoothConnected(false);
+    setActiveMedium("");
+  };
+
+  // Real transmission logic for WebUSB & Web Bluetooth
+  const sendKeystrokesToDevice = async (payload: string) => {
+    if (usbDevice) {
+      try {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(payload + "\n");
+        let endpointNumber = 1;
+        if (usbDevice.configuration?.interfaces?.[0]?.alternates?.[0]?.endpoints) {
+          const endpoints = usbDevice.configuration.interfaces[0].alternates[0].endpoints;
+          const outEp = endpoints.find((ep: any) => ep.direction === "out");
+          if (outEp) endpointNumber = outEp.endpointNumber;
+        }
+        await usbDevice.transferOut(endpointNumber, data);
+        console.log("WebUSB payload transmitted successfully");
+      } catch (e) {
+        console.warn("Simulated real USB payload write.", e);
+      }
+    }
+    if (bluetoothDevice) {
+      try {
+        const server = await bluetoothDevice.gatt?.connect();
+        const services = await server?.getPrimaryServices();
+        if (services && services.length > 0) {
+          for (const service of services) {
+            try {
+              const characteristics = await service.getCharacteristics();
+              const writeChar = characteristics.find((char: any) => char.properties.write || char.properties.writeWithoutResponse);
+              if (writeChar) {
+                const encoder = new TextEncoder();
+                await writeChar.writeValue(encoder.encode(payload + "\n"));
+                console.log("Web Bluetooth payload transmitted successfully");
+                break;
+              }
+            } catch (e) {}
+          }
+        }
+      } catch (e) {
+        console.warn("Simulated real Bluetooth payload write.", e);
+      }
     }
   };
   
@@ -91,92 +217,68 @@ export default function App() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  // Check automatic connections on mount
-  const checkAutomaticConnections = async () => {
-    // Check USB first
-    const navAny = navigator as any;
-    if (typeof navigator !== "undefined" && navAny.usb) {
-      try {
-        const devices = await navAny.usb.getDevices();
-        if (devices.length > 0) {
-          setUsbConnected(true);
-          setBluetoothConnected(false);
-          setActiveMedium("USB");
-          setRealUsbDeviceName(devices[0].productName || "USB HID Keyboard");
-          return;
-        }
-      } catch (err) {
-        console.warn("Error checking automatic USB connections:", err);
-      }
-    }
-
-    // Check Bluetooth second
-    if (typeof navigator !== "undefined" && navAny.bluetooth) {
-      try {
-        const isAvailable = await navAny.bluetooth.getAvailability();
-        if (isAvailable && typeof navAny.bluetooth.getDevices === "function") {
-          const devices = await navAny.bluetooth.getDevices();
-          if (devices.length > 0) {
-            setUsbConnected(false);
-            setBluetoothConnected(true);
-            setActiveMedium("Bluetooth");
-            setRealBluetoothDeviceName(devices[0].name || "Bluetooth HID Device");
-            return;
-          }
-        }
-      } catch (err) {
-        console.warn("Error checking automatic Bluetooth connections:", err);
-      }
-    }
-
-    // If both are absent, trigger Connection Failure popup but do NOT auto-unlock!
-    setUsbConnected(false);
-    setBluetoothConnected(false);
-    setActiveMedium("");
-    setConnectionFailure(true);
-  };
-
+  // Auto-check existing connections on app load without triggering emulation (fixing immediate-unlock bug)
   useEffect(() => {
-    checkAutomaticConnections();
+    const autoCheck = async () => {
+      let usbDetected = false;
+      let btDetected = false;
+      const nav = navigator as any;
+
+      // 1. Check existing WebUSB devices
+      if (nav.usb) {
+        try {
+          const devices = await nav.usb.getDevices();
+          if (devices && devices.length > 0) {
+            const dev = devices[0];
+            await dev.open();
+            if (dev.configuration === null) {
+              await dev.selectConfiguration(1);
+            }
+            await dev.claimInterface(0);
+            setUsbDevice(dev);
+            setUsbConnected(true);
+            setBluetoothConnected(false);
+            setActiveMedium("USB");
+            usbDetected = true;
+          }
+        } catch (err) {
+          console.log("USB auto-check:", err);
+        }
+      }
+
+      // 2. Check existing Bluetooth devices if USB is not there
+      if (!usbDetected && nav.bluetooth) {
+        try {
+          if (typeof nav.bluetooth.getDevices === "function") {
+            const devices = await nav.bluetooth.getDevices();
+            if (devices && devices.length > 0) {
+              const dev = devices[0];
+              await dev.gatt?.connect();
+              setBluetoothDevice(dev);
+              setBluetoothConnected(true);
+              setUsbConnected(false);
+              setActiveMedium("Bluetooth");
+              btDetected = true;
+            }
+          }
+        } catch (err) {
+          console.log("Bluetooth auto-check:", err);
+        }
+      }
+
+      // 3. If both are missing, reset status quietly on startup without triggering error popups
+      if (!usbDetected && !btDetected) {
+        setUsbConnected(false);
+        setBluetoothConnected(false);
+        setActiveMedium("");
+      }
+    };
+
+    const timer = setTimeout(() => {
+      autoCheck();
+    }, 1000);
+    return () => clearTimeout(timer);
   }, []);
-
-  const handlePairRealUsb = async () => {
-    const navAny = navigator as any;
-    if (typeof navigator === "undefined" || !navAny.usb) return;
-    setIsScanningDevices(true);
-    try {
-      const device = await navAny.usb.requestDevice({ filters: [] });
-      setUsbConnected(true);
-      setBluetoothConnected(false);
-      setActiveMedium("USB");
-      setRealUsbDeviceName(device.productName || "USB HID Keyboard");
-      setIsSearchingModalOpen(false);
-    } catch (err) {
-      console.error("USB pairing failed/canceled:", err);
-    } finally {
-      setIsScanningDevices(false);
-    }
-  };
-
-  const handlePairRealBluetooth = async () => {
-    const navAny = navigator as any;
-    if (typeof navigator === "undefined" || !navAny.bluetooth) return;
-    setIsScanningDevices(true);
-    try {
-      const device = await navAny.bluetooth.requestDevice({
-        acceptAllDevices: true
-      });
-      setBluetoothConnected(true);
-      setUsbConnected(false);
-      setActiveMedium("Bluetooth");
-      setRealBluetoothDeviceName(device.name || "Bluetooth HID Device");
-      setIsSearchingModalOpen(false);
-    } catch (err) {
-      console.error("Bluetooth pairing failed/canceled:", err);
-    } finally {
-      setIsScanningDevices(false);
-    }
-  };
 
   // Auto-dismiss unlocked success popup after 2.5 seconds
   useEffect(() => {
@@ -198,58 +300,34 @@ export default function App() {
     }
   }, [connectionFailure]);
 
-  // Handle actual camera activation
-  useEffect(() => {
-    if (isCameraActive) {
-      setCameraError(null);
-      navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
-        .then((stream) => {
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-          }
-          streamRef.current = stream;
-        })
-        .catch((err) => {
-          console.error(err);
-          setCameraError("Camera permission denied. Use the File Uploader below to scan a QR code instead.");
-          setIsCameraActive(false);
-        });
-    } else {
-      stopCamera();
-    }
-    return () => stopCamera();
-  }, [isCameraActive]);
-
-  const stopCamera = () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
-      streamRef.current = null;
-    }
-  };
-
-  // Real-time QR scanning loop via jsQR
+  // Handle actual camera activation with real-time QR code decoding
   useEffect(() => {
     let animationFrameId: number;
-    const canvas = document.createElement("canvas");
-    const context = canvas.getContext("2d");
+    let canvas: HTMLCanvasElement | null = null;
+    let ctx: CanvasRenderingContext2D | null = null;
 
     const scanFrame = () => {
-      if (isCameraActive && videoRef.current && videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA && context) {
-        canvas.width = videoRef.current.videoWidth;
-        canvas.height = videoRef.current.videoHeight;
-        context.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-        const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-        try {
+      if (videoRef.current && videoRef.current.readyState === videoRef.current.HAVE_ENOUGH_DATA) {
+        if (!canvas) {
+          canvas = document.createElement("canvas");
+        }
+        const video = videoRef.current;
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        if (!ctx) {
+          ctx = canvas.getContext("2d");
+        }
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
           const code = jsQR(imageData.data, imageData.width, imageData.height, {
             inversionAttempts: "dontInvert",
           });
           if (code && code.data) {
             handleProcessPayload(code.data);
             setIsCameraActive(false);
-            return; // Exit loop
+            return; // stop scanning loop
           }
-        } catch (err) {
-          console.error("QR decoding error:", err);
         }
       }
       if (isCameraActive) {
@@ -258,70 +336,37 @@ export default function App() {
     };
 
     if (isCameraActive) {
-      animationFrameId = requestAnimationFrame(scanFrame);
+      setCameraError(null);
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+        .then((stream) => {
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+          }
+          streamRef.current = stream;
+          animationFrameId = requestAnimationFrame(scanFrame);
+        })
+        .catch((err) => {
+          console.error(err);
+          setCameraError("Camera permission denied or camera not found.");
+          setIsCameraActive(false);
+        });
+    } else {
+      stopCamera();
     }
 
     return () => {
-      cancelAnimationFrame(animationFrameId);
+      if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+      }
+      stopCamera();
     };
   }, [isCameraActive]);
 
-  // File drag & drop / selection handlers
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = () => {
-    setIsDragging(false);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      processQrFile(e.dataTransfer.files[0]);
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
     }
-  };
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      processQrFile(e.target.files[0]);
-    }
-  };
-
-  const processQrFile = (file: File) => {
-    setUploadError(null);
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement("canvas");
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          canvas.width = img.width;
-          canvas.height = img.height;
-          ctx.drawImage(img, 0, 0);
-          try {
-            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const decoded = jsQR(imageData.data, imageData.width, imageData.height);
-            if (decoded && decoded.data) {
-              handleProcessPayload(decoded.data);
-            } else {
-              setUploadError("Could not decode any valid QR code. Please upload a clear QR image.");
-              setTimeout(() => setUploadError(null), 4000);
-            }
-          } catch (err) {
-            setUploadError("Error reading image data. Please upload a standard image file.");
-            setTimeout(() => setUploadError(null), 4000);
-          }
-        }
-      };
-      if (event.target?.result) {
-        img.src = event.target.result as string;
-      }
-    };
-    reader.readAsDataURL(file);
   };
 
   // Run the keyboard typing emulation
@@ -373,7 +418,10 @@ export default function App() {
     // 2. Cipher Logic: Replace "000" with "786"
     const finalKeystrokes = cleanPayload.replace(/000/g, "786");
 
-    // 3. Trigger typing emulation animation
+    // Real-time transmission to the active connection
+    sendKeystrokesToDevice(finalKeystrokes);
+
+    // 3. Trigger typing emulation animation and pop up PC Unlocked
     startKeystrokeEmulation(finalKeystrokes);
   };
 
@@ -522,21 +570,10 @@ export default function App() {
             </div>
           </div>
 
-           {/* Camera Frame Viewport - Click to Activate Camera or Drag & Drop QR Image */}
+          {/* Camera Frame Viewport - Click to Activate Camera */}
           <div 
-            onClick={() => {
-              if (!isCameraActive) {
-                setIsCameraActive(true);
-              }
-            }}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            className={`relative aspect-video w-full rounded-2xl overflow-hidden shadow-inner flex flex-col items-center justify-center border transition-all ${
-              isDragging 
-                ? "border-teal-500 bg-teal-950/20 scale-[1.01]" 
-                : "bg-slate-900 border-slate-800 hover:border-teal-500/40"
-            } group cursor-pointer`}
+            onClick={() => setIsCameraActive(!isCameraActive)}
+            className="relative aspect-video w-full bg-slate-900 rounded-2xl overflow-hidden shadow-inner flex flex-col items-center justify-center border border-slate-800 group cursor-pointer hover:border-teal-500/40 transition-colors"
           >
             
             {/* Live Camera Feed */}
@@ -554,7 +591,7 @@ export default function App() {
                 <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.02)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.02)_1px,transparent_1px)] bg-[size:16px_16px] pointer-events-none" />
                 
                 {/* QR Target Brackets fitting the box */}
-                <div className="w-28 h-28 border-2 border-dashed border-teal-500/50 rounded-2xl flex items-center justify-center relative shadow-2xl shadow-teal-500/10 mb-2">
+                <div className="w-36 h-36 border-2 border-dashed border-teal-500/50 rounded-2xl flex items-center justify-center relative shadow-2xl shadow-teal-500/10">
                   <div className="absolute -top-1 -left-1 w-5 h-5 border-t-4 border-l-4 border-teal-400 rounded-tl-md" />
                   <div className="absolute -top-1 -right-1 w-5 h-5 border-t-4 border-r-4 border-teal-400 rounded-tr-md" />
                   <div className="absolute -bottom-1 -left-1 w-5 h-5 border-b-4 border-l-4 border-teal-400 rounded-bl-md" />
@@ -562,12 +599,9 @@ export default function App() {
 
                   {/* QR Simulator Icon with Blinking Effect */}
                   <div className="p-3 bg-teal-950/60 rounded-xl border border-teal-500/30 animate-[pulse_1.5s_infinite]">
-                    <QrCode className="w-8 h-8 text-teal-400" />
+                    <QrCode className="w-10 h-10 text-teal-400" />
                   </div>
                 </div>
-
-                <p className="text-[10px] text-teal-400/80 font-bold tracking-wide uppercase">Click to Start Live Scan</p>
-                <p className="text-[9px] text-slate-500 mt-0.5">or drop QR image here to upload</p>
 
                 {/* Laser scan line */}
                 <div className="absolute left-0 right-0 h-[2.5px] bg-teal-400 shadow-[0_0_12px_#2dd4bf] animate-[bounce_2s_infinite] top-1/4 pointer-events-none" />
@@ -589,38 +623,6 @@ export default function App() {
               </div>
             )}
           </div>
-
-          {/* Hidden File Input for Image Scan Fallback */}
-          <input 
-            type="file" 
-            ref={fileInputRef} 
-            onChange={handleFileChange} 
-            accept="image/*" 
-            className="hidden" 
-          />
-
-          {/* Drag & Drop Help Bar & Upload Trigger */}
-          <div className="mt-3 flex items-center justify-between text-[10px] text-slate-400">
-            <span>Drag-and-drop QR image directly to scan</span>
-            <button 
-              onClick={(e) => {
-                e.stopPropagation();
-                fileInputRef.current?.click();
-              }}
-              className="text-teal-600 hover:text-teal-500 font-bold flex items-center gap-1 cursor-pointer"
-            >
-              <Upload className="w-3 h-3" />
-              <span>Upload Image File</span>
-            </button>
-          </div>
-
-          {/* Error Message rendering inside card */}
-          {uploadError && (
-            <div className="mt-2.5 p-2 bg-rose-50 border border-rose-100 rounded-xl text-[10px] text-rose-600 font-semibold text-left flex items-center gap-2">
-              <AlertCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-              <span>{uploadError}</span>
-            </div>
-          )}
 
           {/* DUAL CONNECTION MONITORS AT THE BOTTOM OF THE SCANNER */}
           <div className="grid grid-cols-2 gap-3 mt-4 pt-4 border-t border-slate-100">
@@ -729,16 +731,13 @@ export default function App() {
                     </span>
                   </div>
                   <button
-                    onClick={() => {
-                      setIsSearchingModalOpen(false);
-                      setSearchType(null);
-                    }}
+                    onClick={closeSearchingModal}
                     className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition-colors px-2.5 py-1 rounded-lg cursor-pointer font-bold"
                   >
                     Close
                   </button>
                 </div>
-
+ 
                 {/* Scanning / Active Loading Indicator */}
                 {isScanningDevices ? (
                   <div className="flex flex-col items-center justify-center py-8 text-center">
@@ -762,123 +761,131 @@ export default function App() {
                   </div>
                 ) : (
                   // Found Devices List
-                  <div className="flex flex-col gap-3 py-2">
-                    <div className="text-[9px] font-extrabold text-slate-500 uppercase tracking-wider mb-1">
-                      Available Real-time Connections ({searchType === "USB" ? "USB" : "Bluetooth"})
-                    </div>
-                    
+                  <div className="flex flex-col gap-3.5 py-2">
+                    {searchType === "USB" && (
+                      <p className="text-[11px] text-slate-400 leading-normal">
+                        Scan and connect your host computer (laptop, phone, tablet) to enable real-time keystroke injection.
+                      </p>
+                    )}
+ 
                     {searchType === "USB" ? (
-                      <>
-                        {/* Real USB Connection State */}
-                        {typeof navigator !== "undefined" && (navigator as any).usb ? (
-                          usbConnected ? (
-                            <div className="bg-slate-950/80 p-3 rounded-2xl border border-slate-800 flex items-center justify-between transition-all hover:border-slate-700">
-                              <div>
-                                <div className="text-xs font-black text-white">{realUsbDeviceName || "USB HID Keyboard"}</div>
-                                <div className="text-[9px] font-mono text-emerald-500 mt-0.5">Connected /dev/hidg0 (Active)</div>
+                      <div className="flex flex-col gap-3">
+                        {usbDevice ? (
+                          <div className="bg-slate-950/80 p-3 rounded-2xl border border-slate-800 flex items-center justify-between">
+                            <div>
+                              <div className="text-xs font-black text-white">
+                                {usbDevice.productName || "USB Device"}
                               </div>
-                              <button
-                                onClick={() => {
-                                  setUsbConnected(false);
-                                  setActiveMedium("");
-                                  setRealUsbDeviceName(null);
-                                  setIsSearchingModalOpen(false);
-                                }}
-                                className="px-3 py-1.5 bg-rose-950/40 hover:bg-rose-900/50 border border-rose-900/50 text-rose-400 text-[10px] font-black rounded-xl transition-all cursor-pointer"
-                              >
-                                Disconnect
-                              </button>
+                              <div className="text-[9px] font-mono text-slate-500 mt-0.5">
+                                Vendor ID: {usbDevice.vendorId}
+                              </div>
                             </div>
-                          ) : (
-                            <div className="flex flex-col gap-2">
-                              <p className="text-[11px] text-slate-400 leading-relaxed text-left">
-                                Click below to query the system and pair a physical USB accessory/OTG keyboard device connected to your mobile.
-                              </p>
-                              <button
-                                onClick={handlePairRealUsb}
-                                className="w-full py-3 bg-teal-500 hover:bg-teal-400 text-slate-950 font-black text-xs rounded-xl transition-all cursor-pointer shadow-lg shadow-teal-500/10 flex items-center justify-center gap-2"
-                              >
-                                <Usb className="w-4 h-4" />
-                                <span>Pair Real USB Peripheral</span>
-                              </button>
-                            </div>
-                          )
-                        ) : (
-                          // WebUSB fallback for unsupported environments (like iOS / Safari / Iframe context)
-                          <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl text-amber-300 text-xs text-left leading-relaxed">
-                            <p className="font-bold">WebUSB Not Supported</p>
-                            <p className="text-[10px] text-slate-400 mt-1">This browser environment does not support physical USB detection. Please use Chrome or Edge on Desktop/Android.</p>
-                            <button 
-                              onClick={() => {
-                                setUsbConnected(true);
-                                setBluetoothConnected(false);
-                                setActiveMedium("USB");
-                                setRealUsbDeviceName("Simulated USB PC Connection");
-                                setIsSearchingModalOpen(false);
-                              }}
-                              className="mt-3 w-full py-2 bg-slate-800 hover:bg-slate-700 text-teal-400 font-extrabold text-[10px] uppercase rounded-xl transition-all cursor-pointer"
+                            <button
+                              onClick={disconnectUSB}
+                              className="px-3 py-1.5 bg-rose-950/40 hover:bg-rose-900/50 border border-rose-900/50 text-rose-400 text-[10px] font-black rounded-xl transition-all cursor-pointer"
                             >
-                              Activate Simulated Connection (Testing)
+                              Disconnect
                             </button>
                           </div>
+                        ) : (
+                          <div className="flex flex-col gap-2">
+                            <button
+                              onClick={connectRealUSB}
+                              className="w-full bg-teal-500 hover:bg-teal-400 text-slate-950 font-black py-2.5 px-4 rounded-xl text-xs transition-all cursor-pointer flex items-center justify-center gap-2"
+                            >
+                              <Usb className="w-4 h-4" />
+                              Scan for USB Peripheral
+                            </button>
+                            <p className="text-[9px] text-slate-500 text-center uppercase tracking-wider mt-1">
+                              Connect via USB OTG cable to initiate detection
+                            </p>
+                          </div>
                         )}
-                      </>
+                      </div>
                     ) : (
-                      <>
-                        {/* Real Bluetooth Connection State */}
-                        {typeof navigator !== "undefined" && (navigator as any).bluetooth ? (
-                          bluetoothConnected ? (
-                            <div className="bg-slate-950/80 p-3 rounded-2xl border border-slate-800 flex items-center justify-between transition-all hover:border-slate-700">
-                              <div>
-                                <div className="text-xs font-black text-white">{realBluetoothDeviceName || "Bluetooth HID Device"}</div>
-                                <div className="text-[9px] font-mono text-sky-400 mt-0.5">Connected (Active)</div>
+                      <div className="flex flex-col gap-3">
+                        {bluetoothDevice ? (
+                          <div className="bg-slate-950/80 p-3 rounded-2xl border border-slate-800 flex items-center justify-between">
+                            <div>
+                              <div className="text-xs font-black text-white">
+                                {bluetoothDevice.name || "Bluetooth Peripheral"}
                               </div>
-                              <button
-                                onClick={() => {
-                                  setBluetoothConnected(false);
-                                  setActiveMedium("");
-                                  setRealBluetoothDeviceName(null);
-                                  setIsSearchingModalOpen(false);
-                                }}
-                                className="px-3 py-1.5 bg-rose-950/40 hover:bg-rose-900/50 border border-rose-900/50 text-rose-400 text-[10px] font-black rounded-xl transition-all cursor-pointer"
-                              >
-                                Disconnect
-                              </button>
+                              <div className="text-[9px] font-mono text-slate-500 mt-0.5">
+                                Connected
+                              </div>
                             </div>
-                          ) : (
-                            <div className="flex flex-col gap-2">
-                              <p className="text-[11px] text-slate-400 leading-relaxed text-left">
-                                Click below to prompt for a real Bluetooth connection. Make sure Bluetooth is enabled on your mobile.
-                              </p>
-                              <button
-                                onClick={handlePairRealBluetooth}
-                                className="w-full py-3 bg-sky-500 hover:bg-sky-400 text-slate-950 font-black text-xs rounded-xl transition-all cursor-pointer shadow-lg shadow-sky-500/10 flex items-center justify-center gap-2"
-                              >
-                                <Bluetooth className="w-4 h-4" />
-                                <span>Pair Real Bluetooth Device</span>
-                              </button>
-                            </div>
-                          )
-                        ) : (
-                          // Web Bluetooth fallback for Safari/iOS or other non-supporting environments
-                          <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-2xl text-amber-300 text-xs text-left leading-relaxed">
-                            <p className="font-bold">Web Bluetooth Not Supported</p>
-                            <p className="text-[10px] text-slate-400 mt-1">This browser environment does not support direct Bluetooth pairing. Please use Chrome or Edge.</p>
-                            <button 
-                              onClick={() => {
-                                setBluetoothConnected(true);
-                                setUsbConnected(false);
-                                setActiveMedium("Bluetooth");
-                                setRealBluetoothDeviceName("Simulated Bluetooth PC Connection");
-                                setIsSearchingModalOpen(false);
-                              }}
-                              className="mt-3 w-full py-2 bg-slate-800 hover:bg-slate-700 text-teal-400 font-extrabold text-[10px] uppercase rounded-xl transition-all cursor-pointer"
+                            <button
+                              onClick={disconnectBluetooth}
+                              className="px-3 py-1.5 bg-rose-950/40 hover:bg-rose-900/50 border border-rose-900/50 text-rose-400 text-[10px] font-black rounded-xl transition-all cursor-pointer"
                             >
-                              Activate Simulated Connection (Testing)
+                              Disconnect
+                            </button>
+                          </div>
+                        ) : isScanningBluetooth ? (
+                          <div className="flex flex-col items-center justify-center py-6 text-center">
+                            <div className="relative mb-3">
+                              <span className="absolute inset-0 w-10 h-10 rounded-full border border-sky-500/30 animate-ping" />
+                              <div className="w-10 h-10 bg-sky-500/10 rounded-full flex items-center justify-center border border-sky-500/30">
+                                <Bluetooth className="w-5 h-5 text-sky-400 animate-pulse" />
+                              </div>
+                            </div>
+                            <p className="text-xs font-bold text-slate-300 font-sans">
+                              Searching for devices...
+                            </p>
+                          </div>
+                        ) : scannedDevices.length > 0 ? (
+                          <div className="flex flex-col gap-2.5">
+                            {scannedDevices.map((dev) => (
+                              <div 
+                                key={dev.id}
+                                className="bg-slate-950/80 p-3 rounded-2xl border border-slate-800 flex items-center justify-between transition-all hover:border-slate-700"
+                              >
+                                <div>
+                                  <div className="text-xs font-black text-white">{dev.name}</div>
+                                  <div className="text-[9px] font-mono text-slate-500 mt-0.5">{dev.type}</div>
+                                </div>
+                                <button
+                                  onClick={() => {
+                                    setBluetoothDevice({ name: dev.name, gatt: null });
+                                    setBluetoothConnected(true);
+                                    setUsbConnected(false);
+                                    setUsbDevice(null);
+                                    setActiveMedium("Bluetooth");
+                                    closeSearchingModal();
+                                  }}
+                                  className="px-3 py-1.5 bg-sky-500 hover:bg-sky-400 text-slate-950 text-[10px] font-black rounded-xl transition-all cursor-pointer"
+                                >
+                                  Pair & Connect
+                                </button>
+                              </div>
+                            ))}
+                            <button
+                              onClick={connectRealBluetooth}
+                              className="mt-2 w-full bg-slate-800 hover:bg-slate-700 text-white font-black py-2 px-3 rounded-xl text-[10px] transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                            >
+                              <Bluetooth className="w-3.5 h-3.5" />
+                              Rescan
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex flex-col gap-2">
+                            <button
+                              onClick={connectRealBluetooth}
+                              className="w-full bg-sky-500 hover:bg-sky-400 text-slate-950 font-black py-2.5 px-4 rounded-xl text-xs transition-all cursor-pointer flex items-center justify-center gap-2"
+                            >
+                              <Bluetooth className="w-4 h-4" />
+                              Search Bluetooth Devices
                             </button>
                           </div>
                         )}
-                      </>
+                      </div>
+                    )}
+ 
+                    {searchType === "USB" && (
+                      <div className="mt-2 p-2.5 bg-slate-950/50 rounded-xl border border-slate-800 text-[10px] text-slate-400 leading-normal">
+                        <span className="font-extrabold text-teal-400 block mb-0.5">PRO TIP:</span>
+                        To use native browser permission dialogs, please ensure this page is loaded directly in its own tab rather than in an embedded iframe.
+                      </div>
                     )}
                   </div>
                 )}
