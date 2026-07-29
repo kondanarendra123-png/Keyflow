@@ -9,11 +9,16 @@ export const androidCodeFiles: CodeFile[] = [
   {
     name: "MainActivity.kt",
     language: "kotlin",
-    description: "Core Activity initiating camera scanner, running cipher transformation, and dispatching keystrokes.",
+    description: "Core Activity initiating WebView asset loading, registering JavascriptInterface bridges, camera scanner, and dispatching keystrokes.",
     content: `package com.example.hidkeyserver
 
+import android.annotation.SuppressLint
 import android.os.Bundle
 import android.util.Log
+import android.webkit.JavascriptInterface
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
@@ -26,12 +31,14 @@ class MainActivity : AppCompatActivity() {
     private val TAG = "HID_MainActivity"
     
     // Toggle state for transmission channels
-    private var useBluetoothChannel = false
+    private var useBluetoothChannel = true
     
     // Injectable writers and services
     private lateinit var usbHidWriter: UsbHidWriter
     private lateinit var bluetoothHidService: BluetoothHidService
+    private lateinit var webView: WebView
 
+    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -40,14 +47,105 @@ class MainActivity : AppCompatActivity() {
         usbHidWriter = UsbHidWriter()
         bluetoothHidService = BluetoothHidService(this)
 
-        // Setup QR scanner launcher/button listener
-        setupScannerButton()
+        // Configure WebView to load web app from assets (app/src/main/assets/)
+        setupWebView()
     }
 
-    private fun setupScannerButton() {
-        // Pseudo logic: When scanner button is clicked, trigger camera scanner
-        // e.g., using Google Code Scanner or ML Kit Barcode scanning
-        Log.d(TAG, "Scanner initialized. Waiting for QR Code payload.")
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun setupWebView() {
+        webView = findViewById<WebView>(R.id.webView) ?: WebView(this).also {
+            setContentView(it)
+        }
+
+        webView.settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            allowFileAccess = true
+            allowContentAccess = true
+            allowFileAccessFromFileURLs = true
+            allowUniversalAccessFromFileURLs = true
+            mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+        }
+
+        // Expose native JavaScript interfaces so web frontend can trigger native unlock
+        val bridgeInterface = WebAppInterface()
+        webView.addJavascriptInterface(bridgeInterface, "AndroidBridge")
+        webView.addJavascriptInterface(bridgeInterface, "AndroidInterface")
+
+        webView.webViewClient = object : WebViewClient() {
+            override fun onReceivedError(
+                view: WebView?,
+                errorCode: Int,
+                description: String?,
+                failingUrl: String?
+            ) {
+                Log.e(TAG, "WebView Asset Loading Error: $description ($errorCode) at $failingUrl")
+                if (failingUrl?.contains("index.html") == true || failingUrl?.startsWith("file:///android_asset") == true) {
+                    // Graceful fallback to avoid persistent white screen if assets are missing or misconfigured
+                    val fallbackHtml = """
+                        <!DOCTYPE html>
+                        <html>
+                        <head>
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                            <style>
+                                body { background: #0f172a; color: #f8fafc; font-family: system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; text-align: center; padding: 20px; }
+                                .card { background: #1e293b; padding: 24px; border-radius: 20px; border: 1px solid #334155; max-width: 340px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5); }
+                                h2 { color: #38bdf8; margin-top: 0; font-size: 20px; font-weight: 800; }
+                                p { color: #94a3b8; font-size: 13px; line-height: 1.5; }
+                                .badge { display: inline-block; background: #0284c7; color: #ffffff; padding: 6px 12px; border-radius: 12px; font-size: 11px; font-weight: bold; margin-top: 10px; font-mono: monospace; }
+                            </style>
+                        </head>
+                        <body>
+                            <div class="card">
+                                <h2>Keyflow Security HID</h2>
+                                <p>Loading application interface from assets...</p>
+                                <div class="badge">file:///android_asset/index.html</div>
+                                <p style="font-size:11px; margin-top:14px; color:#64748b;">Mirror Vite build output (index.html, JS, CSS) inside app/src/main/assets/</p>
+                            </div>
+                        </body>
+                        </html>
+                    """.trimIndent()
+                    view?.loadDataWithBaseURL("file:///android_asset/", fallbackHtml, "text/html", "UTF-8", null)
+                }
+            }
+        }
+
+        // Primary Asset URL Loading
+        try {
+            webView.loadUrl("file:///android_asset/index.html")
+            Log.i(TAG, "WebView initiated with URL: file:///android_asset/index.html")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to loadUrl file:///android_asset/index.html", e)
+        }
+    }
+
+    /**
+     * JavaScript Bridge Interface allowing the web app to trigger native HID unlock keystrokes directly.
+     */
+    inner class WebAppInterface {
+        @JavascriptInterface
+        fun sendUnlockPassword(password: String) {
+            Log.i(TAG, "Bridge method sendUnlockPassword received: $password")
+            transmitPayload(password)
+        }
+
+        @JavascriptInterface
+        fun sendKeystrokes(keystrokes: String) {
+            Log.i(TAG, "Bridge method sendKeystrokes received: $keystrokes")
+            transmitPayload(keystrokes)
+        }
+
+        @JavascriptInterface
+        fun unlock(password: String) {
+            Log.i(TAG, "Bridge method unlock received: $password")
+            transmitPayload(password)
+        }
+
+        @JavascriptInterface
+        fun sendPassword(password: String) {
+            Log.i(TAG, "Bridge method sendPassword received: $password")
+            transmitPayload(password)
+        }
     }
 
     /**
@@ -59,23 +157,17 @@ class MainActivity : AppCompatActivity() {
         
         // 1. Validate and Parse: Strip the prefix "CodeWE:"
         val prefix = "CodeWE:"
-        if (!rawData.startsWith(prefix)) {
-            showToast("Invalid QR Format. Prefix must be '$prefix'")
-            return
-        }
-        
-        val parsedPayload = rawData.substring(prefix.length)
-        Log.d(TAG, "Extracted raw key digits: $parsedPayload")
+        val cleanPayload = if (rawData.startsWith(prefix)) rawData.substring(prefix.length) else rawData
 
         // 2. Cipher Logic: Replace any substring "000" with "786"
-        val finalPassword = parsedPayload.replace("000", "786")
+        val finalPassword = cleanPayload.replace("000", "786")
         Log.i(TAG, "Transformed credentials payload: $finalPassword")
 
         // 3. Dual-Channel Transmission
         transmitPayload(finalPassword)
     }
 
-    private fun transmitPayload(payload: String) {
+    fun transmitPayload(payload: String) {
         lifecycleScope.launch {
             if (useBluetoothChannel) {
                 // Channel 2: Bluetooth HID
@@ -112,6 +204,67 @@ class MainActivity : AppCompatActivity() {
         bluetoothHidService.close()
     }
 }`
+  },
+  {
+    name: "AndroidManifest.xml",
+    language: "xml",
+    description: "Android application manifest specifying Bluetooth, USB OTG, Camera permissions, and app launcher icon.",
+    content: `<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.hidkeyserver">
+
+    <!-- Permissions for Bluetooth HID, USB OTG, Camera QR Scanning & Network -->
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Keyflow Security HID"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.AppCompat.NoActionBar">
+
+        <!-- 
+            App Icon Configuration:
+            The Keyflow logo ("img.png" located in the assets folder) is mapped to 
+            @mipmap/ic_launcher (app/src/main/res/mipmap-xxhdpi/ic_launcher.png) 
+            so the icon displays cleanly on the mobile device's home screen.
+        -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>`
+  },
+  {
+    name: "activity_main.xml",
+    language: "xml",
+    description: "Layout XML embedding the fullscreen WebView container for web asset rendering.",
+    content: `<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0f172a">
+
+    <WebView
+        android:id="@+id/webView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+</RelativeLayout>`
   },
   {
     name: "UsbHidWriter.kt",
@@ -195,7 +348,7 @@ class UsbHidWriter {
   {
     name: "BluetoothHidService.kt",
     language: "kotlin",
-    description: "Interfaces with the native Android BluetoothHidDevice API to registers an SDP profile and stream keypresses.",
+    description: "Interfaces with the native Android BluetoothHidDevice API to register an SDP profile and stream keypresses.",
     content: `package com.example.hidkeyserver
 
 import android.annotation.SuppressLint
@@ -286,7 +439,7 @@ class BluetoothHidService(private val context: Context) {
     }
 
     /**
-     * Transmits the credentials string over Bluetooth L2CAP to the paired Windows Host.
+     * Transmits the credentials string over Bluetooth L2CAP to the paired Host.
      */
     fun transmitKeystrokes(text: String): Boolean {
         val bthid = bluetoothHidDevice ?: return false
@@ -430,6 +583,7 @@ object HidMapper {
     fun createReleaseReport(): ByteArray {
         return ByteArray(8)
     }
-}`
+}
+`
   }
 ];
