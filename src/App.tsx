@@ -27,6 +27,25 @@ import { motion, AnimatePresence } from "motion/react";
 import { androidCodeFiles } from "./data/androidCode";
 import jsQR from "jsqr";
 
+declare global {
+  interface Window {
+    AndroidBridge?: {
+      sendUnlockPassword?: (password: string) => void;
+      sendKeystrokes?: (keystrokes: string) => void;
+      unlock?: (password: string) => void;
+      sendPassword?: (password: string) => void;
+      [key: string]: any;
+    };
+    AndroidInterface?: {
+      sendUnlockPassword?: (password: string) => void;
+      sendKeystrokes?: (keystrokes: string) => void;
+      unlock?: (password: string) => void;
+      sendPassword?: (password: string) => void;
+      [key: string]: any;
+    };
+  }
+}
+
 export default function App() {
   // Simulator connection states
   const [usbConnected, setUsbConnected] = useState(false);
@@ -180,8 +199,31 @@ export default function App() {
     setActiveMedium("");
   };
 
-  // Real transmission logic for WebUSB & Web Bluetooth
+  // Real transmission logic for WebUSB, Web Bluetooth & Native Android Bridge
   const sendKeystrokesToDevice = async (payload: string) => {
+    // 1. Check if native Android bridge is available
+    const win = window as any;
+    const bridge = win.AndroidBridge || win.AndroidInterface;
+    if (bridge) {
+      try {
+        if (typeof bridge.sendUnlockPassword === "function") {
+          bridge.sendUnlockPassword(payload);
+          console.log("Native Android bridge sendUnlockPassword transmitted successfully");
+        } else if (typeof bridge.sendKeystrokes === "function") {
+          bridge.sendKeystrokes(payload);
+          console.log("Native Android bridge sendKeystrokes transmitted successfully");
+        } else if (typeof bridge.unlock === "function") {
+          bridge.unlock(payload);
+          console.log("Native Android bridge unlock transmitted successfully");
+        } else if (typeof bridge.sendPassword === "function") {
+          bridge.sendPassword(payload);
+          console.log("Native Android bridge sendPassword transmitted successfully");
+        }
+      } catch (e) {
+        console.warn("Error calling native Android bridge:", e);
+      }
+    }
+
     if (usbDevice) {
       try {
         const encoder = new TextEncoder();
@@ -249,8 +291,17 @@ export default function App() {
       let btDetected = false;
       const nav = navigator as any;
 
+      // 0. Check native Android bridge
+      const win = window as any;
+      const bridge = win.AndroidBridge || win.AndroidInterface;
+      if (bridge) {
+        setBluetoothConnected(true);
+        setActiveMedium("Bluetooth");
+        btDetected = true;
+      }
+
       // 1. Check existing WebUSB devices
-      if (nav.usb) {
+      if (!btDetected && nav.usb) {
         try {
           const devices = await nav.usb.getDevices();
           if (devices && devices.length > 0) {
@@ -440,7 +491,13 @@ export default function App() {
 
   // Main cipher logic triggered when scanning
   const handleProcessPayload = (raw: string) => {
-    if (usbConnected) {
+    const win = window as any;
+    const bridge = win.AndroidBridge || win.AndroidInterface;
+
+    if (bridge) {
+      setActiveMedium("Bluetooth");
+      setBluetoothConnected(true);
+    } else if (usbConnected) {
       setActiveMedium("USB");
     } else if (bluetoothConnected) {
       setActiveMedium("Bluetooth");
@@ -538,11 +595,20 @@ export default function App() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => {
-                if (usbConnected) {
+                const win = window as any;
+                const bridge = win.AndroidBridge || win.AndroidInterface;
+                if (bridge) {
+                  setActiveMedium("Bluetooth");
+                  setBluetoothConnected(true);
+                  sendKeystrokesToDevice(storedPassword);
+                  startKeystrokeEmulation(storedPassword);
+                } else if (usbConnected) {
                   setActiveMedium("USB");
+                  sendKeystrokesToDevice(storedPassword);
                   startKeystrokeEmulation(storedPassword);
                 } else if (bluetoothConnected) {
                   setActiveMedium("Bluetooth");
+                  sendKeystrokesToDevice(storedPassword);
                   startKeystrokeEmulation(storedPassword);
                 } else {
                   setConnectionFailure(true);
